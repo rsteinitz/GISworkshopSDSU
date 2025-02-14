@@ -1,0 +1,249 @@
+---
+title: "GIS_workshop_2025"
+author: "Ronnie Bailey-Steinitz"
+date: "2025-02-14"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introduction
+
+Welcome to the workshop on **GPS Data Analysis & Visualization**! In this session, we will learn how to:
+
+- Load and clean GPS data
+- Visualize GPS points on maps
+- Perform home range analysis (Minimum Convex Polygon and Kernel Density Estimation)
+- Customize maps for reports
+- Export results to use in QGIS
+
+## Prerequisites
+Before we start, make sure you have installed the following:
+
+- **Software:** R, RStudio, QGIS
+- **R Packages:**
+  ```{r}
+  install.packages(c("tidyverse", "sf", "sp", "rnaturalearth", "rnaturalearthdata", "ggspatial", "adehabitatHR"))
+  ```
+
+# 1. Loading and Cleaning GPS Data
+
+First, we load our GPS dataset. The dataset should be a CSV file with columns for latitude, longitude, and individual ID.
+(to add a code chunk, hit Cmd+Opt+i (Mac) / Ctrl+Alt+i (Windows & Linux))
+
+```{r}
+library(tidyverse)
+library(sf)
+
+gps_data <- read_csv("gps_data.csv")
+head(gps_data)
+```
+
+we can also use publicly-available GPS datasets to practice: 
+```{r}
+
+install.packages("move")
+library(move)
+
+# Load an example dataset
+data("leroy")
+plot(leroy)
+
+# Convert to a standard data frame
+leroy_df <- as.data.frame(leroy) %>% 
+  rename(longitude = location.long,
+         latitude = location.lat)
+
+leroy_df_filtered <- leroy_df %>%
+  filter(longitude >= -180 & longitude <= 180,  # Valid longitudes
+         latitude >= -90 & latitude <= 90)  # Valid latitudes
+
+
+# View the first few rows
+head(leroy_df)
+
+# Show column names and data types
+str(leroy_df)  
+
+# place the Leroy dataset into out "gps_data" object to use for the exercise
+gps_data <- leroy_df
+
+```
+
+
+Now, we convert the data into a **spatial object** so R recognizes it as geographic data.
+
+```{r}
+gps_sf <- st_as_sf(gps_data, coords = c("longitude", "latitude"), crs = 4326)
+```
+
+### Detecting Outliers
+GPS errors can occur, so let’s check for outliers by plotting the raw data.
+
+```{r}
+library(ggplot2)
+
+ggplot() +
+  geom_sf(data = gps_sf, alpha = 0.6) + 
+  theme_minimal()
+
+# you don't need to tell ggplot what your lat/lon are (e.g., "aes(x = lon, y = lat)") because we converted a spreadsheet into an 'sf' object with "geometry", which is inherently geographic- it already has embedded coordinates.
+
+# have a look: 
+class(gps_sf$geometry)
+# [1] "sfc_POINT" "sfc"     
+
+```
+
+If you see points far from expected locations, you may need to filter extreme values.
+
+
+# 2. Visualizing GPS Data on a Map
+
+We will use **Natural Earth Data** (an open-access map source) to plot GPS points.
+
+```{r}
+# install.packages("rnaturalearthdata")
+library(rnaturalearth)
+library(ggspatial)
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Compute bounding box and expand it
+bbox <- st_bbox(gps_sf)
+
+# Expand the bbox slightly (adjust factor as needed)
+expand_factor <- 100  # Expands by 5%
+expand_factor <- 0.05  # Expands by 100%
+bbox_expanded <- bbox + c(-expand_factor, -expand_factor, expand_factor, expand_factor) * (bbox["xmax"] - bbox["xmin"])
+
+# Convert bbox to an sf polygon for plotting
+bbox_sf <- st_as_sfc(st_bbox(bbox_expanded, crs = st_crs(gps_sf)))
+
+ggplot() +
+  geom_sf(data = world, fill = "gray95", color = "gray70") +
+  geom_sf(data = gps_sf, alpha = 0.6, size = 2) +
+  coord_sf(xlim = c(bbox_expanded["xmin"], bbox_expanded["xmax"]), 
+           ylim = c(bbox_expanded["ymin"], bbox_expanded["ymax"])) +
+  theme_minimal() +
+  annotation_scale(location = "br") +
+  annotation_north_arrow(location = "tl", which_north = "true")
+
+
+```
+
+
+Using ggmap for satellite basemap
+
+```{r}
+
+install.packages("basemaps")
+library(basemaps)
+
+# check out what maps they have
+get_maptypes()
+
+# Get bounding box of gps_data
+bbox <- st_bbox(gps_sf)
+
+ggplot() +
+  basemap(bbox, basemap = "natgeo_world_map") +
+  geom_sf(data = gps_sf, fill = NA) +
+  coord_sf(xlim = c(bbox$xmin, bbox$xmax), ylim = c(bbox$ymin, bbox$ymax), crs = 4326)
+
+
+
+ggplot() +
+  bm_map() +  # Adds the Esri NatGeo World Map as a basemap
+  geom_sf(data = gps_data, color = "blue", alpha = 0.6) +  # GPS points
+  geom_sf(data = st_as_sfc(bbox_expanded), fill = NA, color = "red", linetype = "dashed") +  # Bounding box
+  coord_sf(xlim = c(bbox_expanded["xmin"], bbox_expanded["xmax"]), 
+           ylim = c(bbox_expanded["ymin"], bbox_expanded["ymax"])) +
+  theme_minimal()
+
+
+
+
+
+
+```
+
+
+### Customizing the Visualization
+- **Change colors by individual**
+- **Adjust point size and opacity**
+
+# 3. Home Range Analysis
+
+### 3.1 Minimum Convex Polygon (MCP)
+MCP is a simple method that creates a convex shape around an animal’s locations to estimate its home range.
+
+```{r}
+library(adehabitatHR)
+
+coords <- gps_sf %>% select(geometry) %>% st_coordinates()
+mcp_poly <- mcp(as.ltraj(coords, id = gps_sf$individual_id, typeII = FALSE), percent = 95)
+
+ggplot() +
+  geom_sf(data = world, fill = "gray95", color = "gray70") +
+  geom_sf(data = mcp_poly, fill = "blue", alpha = 0.3, color = "blue") +
+  geom_point(data = gps_sf, aes(x = longitude, y = latitude), color = "red", alpha = 0.6) +
+  theme_minimal()
+```
+
+### 3.2 Kernel Density Estimation (KDE)
+KDE estimates an animal’s home range by calculating the probability of where it spends time. Unlike MCP, KDE accounts for varying densities of points.
+
+```{r}
+kde_res <- kernelUD(coords, h = "href", grid = 500)
+kde_poly <- getverticeshr(kde_res, 95)
+
+ggplot() +
+  geom_sf(data = world, fill = "gray95", color = "gray70") +
+  geom_sf(data = kde_poly, fill = "purple", alpha = 0.3, color = "purple") +
+  geom_point(data = gps_sf, aes(x = longitude, y = latitude), color = "red", alpha = 0.6) +
+  theme_minimal()
+```
+
+# 4. Importing Results into QGIS
+- Export gps_data as .csv
+- Export **MCP and KDE home ranges** as shapefiles
+- Load shapefiles into QGIS
+- Customize colors, transparency, and labels
+
+# Exporting the dataset as .csv
+```{r}
+
+write.csv(gps_data, "leroy_gps_data.csv")
+
+```
+
+
+# 5. Additional Visualizations
+
+### **Tracking Animal Movements Over Time**
+```{r}
+ggplot() +
+  geom_sf(data = world, fill = "gray95", color = "gray70") +
+  geom_path(data = gps_sf, aes(x = longitude, y = latitude, group = individual_id, color = individual_id)) +
+  theme_minimal()
+```
+
+### **Heatmap of GPS Density**
+```{r}
+# Example of density estimation visualization
+library(ggplot2)
+ggplot(gps_sf, aes(x = longitude, y = latitude)) +
+  stat_density_2d(aes(fill = ..level..), geom = "polygon") +
+  theme_minimal()
+```
+
+# Conclusion
+This workshop introduced the basics of GPS data analysis using R and QGIS. You can explore more by testing different home range techniques, adding environmental layers in QGIS, or using time-based movement analysis.
+
+**Next Steps:**
+- Try mapping other species or datasets
+- Explore different projection systems in QGIS
+- Combine GPS data with habitat or environmental layers
+
+Happy coding! 🚀
